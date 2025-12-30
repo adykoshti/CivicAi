@@ -45,6 +45,57 @@ export const getHealthRisk = (aqi: number) => {
   return { level: 'Very High', description: 'Health effects may be experienced by all' };
 };
 
+// Helper to convert AQI back to concentration (approximate)
+const aqiToConcentration = (aqi: number, pollutant: 'pm25' | 'pm10' | 'no2' | 'o3'): number => {
+  if (!aqi) return 0;
+  
+  // Breakpoints based on US EPA
+  const breakpoints = {
+    pm25: [
+      { aqi: [0, 50], conc: [0, 12.0] },
+      { aqi: [51, 100], conc: [12.1, 35.4] },
+      { aqi: [101, 150], conc: [35.5, 55.4] },
+      { aqi: [151, 200], conc: [55.5, 150.4] },
+      { aqi: [201, 300], conc: [150.5, 250.4] },
+      { aqi: [301, 500], conc: [250.5, 500.4] }
+    ],
+    pm10: [
+      { aqi: [0, 50], conc: [0, 54] },
+      { aqi: [51, 100], conc: [55, 154] },
+      { aqi: [101, 150], conc: [155, 254] },
+      { aqi: [151, 200], conc: [255, 354] },
+      { aqi: [201, 300], conc: [355, 424] },
+      { aqi: [301, 500], conc: [425, 604] }
+    ],
+    no2: [ // ppb
+      { aqi: [0, 50], conc: [0, 53] },
+      { aqi: [51, 100], conc: [54, 100] },
+      { aqi: [101, 150], conc: [101, 360] },
+      { aqi: [151, 200], conc: [361, 649] },
+      { aqi: [201, 300], conc: [650, 1249] },
+      { aqi: [301, 500], conc: [1250, 2049] }
+    ],
+    o3: [ // ppb
+      { aqi: [0, 50], conc: [0, 54] },
+      { aqi: [51, 100], conc: [55, 70] },
+      { aqi: [101, 150], conc: [71, 85] },
+      { aqi: [151, 200], conc: [86, 105] },
+      { aqi: [201, 300], conc: [106, 200] }
+    ]
+  };
+
+  const range = breakpoints[pollutant].find(r => aqi >= r.aqi[0] && aqi <= r.aqi[1]);
+  
+  if (range) {
+    const [iLow, iHigh] = range.aqi;
+    const [cLow, cHigh] = range.conc;
+    const concentration = ((aqi - iLow) / (iHigh - iLow)) * (cHigh - cLow) + cLow;
+    return Number(concentration.toFixed(1));
+  }
+
+  return aqi; // Fallback if out of range
+};
+
 export const fetchLatestAQI = async (city?: string) => {
   const targetCity = city || 'ahmedabad';
   
@@ -57,12 +108,12 @@ export const fetchLatestAQI = async (city?: string) => {
       const data = waqiData.data;
       const aqiValue = data.aqi;
       
-      // Extract pollutants if available
+      // Extract pollutants if available and convert IAQI to approximate concentration
       const pollutants = {
-        pm25: data.iaqi?.pm25?.v || 0,
-        pm10: data.iaqi?.pm10?.v || 0,
-        no2: data.iaqi?.no2?.v || 0,
-        o3: data.iaqi?.o3?.v || 0,
+        pm25: aqiToConcentration(data.iaqi?.pm25?.v || 0, 'pm25'),
+        pm10: aqiToConcentration(data.iaqi?.pm10?.v || 0, 'pm10'),
+        no2: aqiToConcentration(data.iaqi?.no2?.v || 0, 'no2'),
+        o3: aqiToConcentration(data.iaqi?.o3?.v || 0, 'o3'),
         so2: data.iaqi?.so2?.v || 0,
         co: data.iaqi?.co?.v || 0,
       };

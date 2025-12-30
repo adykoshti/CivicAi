@@ -41,7 +41,7 @@ const AQICard = ({ aqi, status, pollutants }: AQICardProps) => {
           </div>
           <div className="text-center">
             <p className="text-xs text-muted-foreground mb-1">PM10</p>
-            <p className="text-lg font-semibold text-foreground">{pollutants.pm10}</p>
+            <p className="text-lg font-semibold text-foreground">{pollutants.pm10} <span className="text-xs text-muted-foreground">µg/m³</span></p>
           </div>
           <div className="text-center">
             <p className="text-xs text-muted-foreground mb-1">NO₂</p>
