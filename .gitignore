@@ -1,0 +1,45 @@
+# OS and editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.iml
+
+# Logs and coverage
+*.log
+logs/
+.nyc_output/
+coverage/
+.coverage
+coverage.xml
+
+# Env files
+.env
+.env.*
+.env.local
+.env.*.local
+
+# Node.js
+node_modules/
+dist/
+build/
+.next/
+.cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ML artifacts and local data
+mlModel/CivicAI/backend/artifacts/*
+mlModel/CivicAI/backend/data/*

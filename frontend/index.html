@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>CivicAI – AI-Powered Environmental Intelligence for Cities</title>
+    <meta name="description" content="Real-time air quality monitoring, predictive analytics, and actionable insights for healthier cities. Powered by hybrid ML models and SHAP explainability." />
+    <meta name="author" content="CivicAI" />
+    <meta name="keywords" content="air quality, AQI, environmental monitoring, smart city, IoT, machine learning, SHAP, pollution" />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="CivicAI – AI-Powered Environmental Intelligence" />
+    <meta property="og:description" content="Real-time air quality monitoring with predictive analytics for smarter, healthier cities." />
+    <meta property="og:type" content="website" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="CivicAI – Environmental Intelligence Platform" />
+    <meta name="twitter:description" content="AI-powered air quality monitoring and prediction for cities." />
+
+    <link rel="canonical" href="https://civicai.dev" />
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- Material Icons -->
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet" />
+
+    <!-- Tailwind CDN (temporary; safe for now) -->
+    <script src="https://cdn.tailwindcss.com?plugins=forms,typography"></script>
+    <script>
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              primary: "#3B82F6",
+              "primary-hover": "#2563EB",
+              "background-light": "#F8FAFC",
+              "background-dark": "#0F172A",
+            },
+            fontFamily: {
+              display: ["Inter", "sans-serif"],
+              body: ["Inter", "sans-serif"],
+            },
+          },
+        },
+      };
+    </script>
+  </head>
+
+  <body class="font-body">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
