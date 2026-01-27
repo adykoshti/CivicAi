@@ -41,5 +41,5 @@ env/
 .ipynb_checkpoints/
 
 # ML artifacts and local data
-mlModel/CivicAI/backend/artifacts/*
-mlModel/CivicAI/backend/data/*
+backend/artifacts/*
+backend/data/*
