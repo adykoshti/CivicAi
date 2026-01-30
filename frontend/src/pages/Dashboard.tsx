@@ -43,12 +43,15 @@ const Dashboard = () => {
     const loadData = async () => {
       setLoading(true);
       try {
-        const [aqi, pred, shap, recs] = await Promise.all([
-          fetchLatestAQI(selectedCity),
-          fetchPrediction(),
+        // Fetch AQI first as it is needed for recommendations
+        const aqi = await fetchLatestAQI(selectedCity);
+        
+        const [pred, shap, recs] = await Promise.all([
+          fetchPrediction(selectedCity),
           fetchSHAPData(),
-          fetchRecommendations(),
+          fetchRecommendations(aqi),
         ]);
+        
         setAqiData(aqi);
         setPrediction(pred);
         setShapData(shap);
@@ -152,6 +155,7 @@ const Dashboard = () => {
             predictedAQI={prediction?.predictedAQI || 62}
             trend={prediction?.trend || 'up'}
             confidence={prediction?.confidence || 0.87}
+            forecast={prediction?.forecast}
           />
           
           <MiniMap city={cities.find(c => c.id === selectedCity)?.name || "Ahmedabad"} state="India" />

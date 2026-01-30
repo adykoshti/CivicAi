@@ -43,3 +43,12 @@ env/
 # ML artifacts and local data
 backend/artifacts/*
 backend/data/*
+backend/models/*
+
+# ML Model files (global)
+*.pkl
+*.h5
+*.joblib
+*.onnx
+*.pt
+*.pth

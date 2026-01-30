@@ -29,8 +29,8 @@ const CityInsights = () => {
     };
     loadCities();
 
-    // Auto-refresh every 5 minutes
-    const interval = setInterval(loadCities, 300000);
+    // Auto-refresh every 30 seconds (User requested)
+    const interval = setInterval(loadCities, 30000);
     return () => clearInterval(interval);
   }, []);
 

@@ -1,0 +1,57 @@
+{
+    "stage": {
+        "0": "Normal",
+        "1": "Stage I",
+        "2": "Stage II",
+        "3": "Stage III",
+        "4": "Stage IV"
+    },
+    "severity": {
+        "0": "Good/Satisfactory",
+        "1": "Moderate",
+        "2": "Poor",
+        "3": "Very Poor",
+        "4": "Severe"
+    },
+    "actions": {
+        "0": [
+            "Continue routine monitoring",
+            "Encourage outdoor activities",
+            "Maintain green cover in urban areas",
+            "Promote use of bicycles and walking"
+        ],
+        "1": [
+            "Enforce dust control at construction sites",
+            "Mechanical sweeping of roads",
+            "Water sprinkling on roads",
+            "Strictly enforce ban on open burning of garbage",
+            "Deploy anti-smog guns at major construction sites",
+            "Vigilance on visibly polluting vehicles"
+        ],
+        "2": [
+            "Ban diesel generators (except essential services)",
+            "Parking fee hike to discourage private transport",
+            "Increase bus/metro services frequency",
+            "Stop coal/firewood usage in hotels/eateries",
+            "Alert citizens with respiratory issues to limit outdoor exposure",
+            "Encourage people to use public transport"
+        ],
+        "3": [
+            "Close brick kilns and hot mix plants",
+            "Close stone crushers",
+            "Maximize power generation from gas-based plants",
+            "Ban on construction and demolition activities",
+            "Close down industries using non-approved fuels",
+            "Introduce differential rates to encourage off-peak travel"
+        ],
+        "4": [
+            "Stop construction activities completely",
+            "Stop entry of heavy trucks into city (except essentials)",
+            "Odd-even vehicle scheme implementation",
+            "School closure / Online classes",
+            "Ban on plying of diesel light motor vehicles (BS-IV and below)",
+            "Work from home for public and private offices",
+            "Emergency measures for vulnerable groups"
+        ]
+    }
+}

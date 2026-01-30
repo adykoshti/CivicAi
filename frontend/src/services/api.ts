@@ -5,11 +5,30 @@ const WAQI_BASE_URL = 'https://api.waqi.info/feed';
 
 // Mock IoT data (keep as is for now)
 const mockIoTData = [
-  { id: 1, sensorId: 'S001', location: 'Downtown', pm25: 15.2, pm10: 28, no2: 22, o3: 35, timestamp: '2024-12-13 10:00' },
-  { id: 2, sensorId: 'S002', location: 'Industrial Zone', pm25: 45.8, pm10: 68, no2: 55, o3: 28, timestamp: '2024-12-13 10:00' },
-  { id: 3, sensorId: 'S003', location: 'Residential', pm25: 8.5, pm10: 15, no2: 12, o3: 42, timestamp: '2024-12-13 10:00' },
-  { id: 4, sensorId: 'S004', location: 'Highway', pm25: 32.1, pm10: 52, no2: 48, o3: 25, timestamp: '2024-12-13 10:00' },
-  { id: 5, sensorId: 'S005', location: 'Park', pm25: 5.2, pm10: 10, no2: 8, o3: 45, timestamp: '2024-12-13 10:00' },
+  { 
+    _id: '1', 
+    city: 'Downtown', 
+    AQI: 65, 
+    features: { 'PM2.5': 15.2, 'PM10': 28, 'NO2': 22, 'O3': 35, 'SO2': 10, 'CO': 0.5 },
+    raw_values: { no2: 22, co: 0.5 },
+    timestamp: '2024-12-13 10:00' 
+  },
+  { 
+    _id: '2', 
+    city: 'Industrial Zone', 
+    AQI: 120, 
+    features: { 'PM2.5': 45.8, 'PM10': 68, 'NO2': 55, 'O3': 28, 'SO2': 25, 'CO': 1.5 },
+    raw_values: { no2: 55, co: 1.5 },
+    timestamp: '2024-12-13 10:00' 
+  },
+  { 
+    _id: '3', 
+    city: 'Residential', 
+    AQI: 45, 
+    features: { 'PM2.5': 8.5, 'PM10': 15, 'NO2': 12, 'O3': 42, 'SO2': 5, 'CO': 0.3 },
+    raw_values: { no2: 12, co: 0.3 },
+    timestamp: '2024-12-13 10:00' 
+  },
 ];
 
 export const CITY_LIST = [
@@ -46,7 +65,7 @@ export const getHealthRisk = (aqi: number) => {
 };
 
 // Helper to convert AQI back to concentration (approximate)
-const aqiToConcentration = (aqi: number, pollutant: 'pm25' | 'pm10' | 'no2' | 'o3'): number => {
+export const aqiToConcentration = (aqi: number, pollutant: 'pm25' | 'pm10' | 'no2' | 'o3'): number => {
   if (!aqi) return 0;
   
   // Breakpoints based on US EPA
@@ -188,21 +207,33 @@ export const fetchLatestAQI = async (city?: string) => {
   }
 };
 
-export const fetchPrediction = async () => {
+export const fetchPrediction = async (city?: string) => {
   try {
-    const response = await fetch(`${API_BASE_URL}/predict-latest-aqi`);
+    // If no city provided, default to Ahmedabad for backward compatibility
+    const targetCity = city || 'ahmedabad';
+    
+    // Use city-data endpoint which now handles the "only Ahmedabad" logic
+    const response = await fetch(`${API_BASE_URL}/city-data?city=${encodeURIComponent(targetCity)}`);
+    
     if (!response.ok) throw new Error('Network response was not ok');
     const data = await response.json();
 
+    // Validate forecast structure
+    const forecastData = data.forecast_next_24h;
+    const isValidForecast = forecastData && 
+                            typeof forecastData.min === 'number' && 
+                            typeof forecastData.max === 'number';
+
     return {
-      predictedAQI: Math.round(data.predicted_aqi),
+      predictedAQI: data.predicted_aqi !== null ? Math.round(data.predicted_aqi) : "?",
       trend: 'stable', 
-      confidence: data.confidence ? data.confidence / 100 : 0.85, // Use backend confidence if available
-      timeframe: '24h'
+      confidence: data.confidence !== undefined ? data.confidence : 0.85, 
+      timeframe: '24h',
+      forecast: isValidForecast ? forecastData : null
     };
   } catch (error) {
     console.error("Failed to fetch prediction:", error);
-    return { predictedAQI: 0, trend: 'unknown', confidence: 0, timeframe: '24h' };
+    return { predictedAQI: 0, trend: 'unknown', confidence: 0, timeframe: '24h', forecast: null };
   }
 };
 
@@ -232,11 +263,12 @@ export const fetchSHAPData = async () => {
     // Return mock data so the chart always shows something
     return { 
         features: [
+            { name: 'PM10', value: 25.4, color: 'destructive' },
             { name: 'PM2.5', value: 12.5, color: 'destructive' },
-            { name: 'Traffic', value: 8.2, color: 'destructive' },
-            { name: 'Wind Speed', value: -5.4, color: 'success' },
-            { name: 'Temperature', value: 3.1, color: 'destructive' },
-            { name: 'Humidity', value: -2.1, color: 'success' }
+            { name: 'NO2', value: 18.2, color: 'destructive' },
+            { name: 'SO2', value: -5.4, color: 'success' },
+            { name: 'NH3', value: 3.1, color: 'destructive' },
+            { name: 'O3', value: -2.1, color: 'success' }
         ] 
     };
   }
@@ -331,6 +363,86 @@ export const fetchCities = async () => {
   }
 };
 
-export const fetchRecommendations = async () => {
-  return new Promise(resolve => setTimeout(() => resolve(mockRecommendations), 500));
+export const fetchRecommendations = async (aqiData?: any) => {
+  try {
+    // If no AQI data provided or it's missing essential components, fallback to mock
+    if (!aqiData || !aqiData.pollutants) {
+      console.warn("No AQI data provided for recommendations, using mock.");
+      return mockRecommendations;
+    }
+
+    // Extract features required by the GRAP model
+    // Note: GRAP model expects: PM2.5, PM10, NO2, SO2, CO, Temperature, Wind Speed
+    const pollutants = aqiData.pollutants || {};
+    const iaqi = aqiData.raw?.iaqi || {};
+
+    // Use raw AQI values from WAQI API if available, as they often map better to GRAP stages 
+    // when concentration conversion is ambiguous or yields low values.
+    // Fallback to 'pollutants' (calculated conc) or defaults.
+    const payload = {
+      "PM2.5": iaqi.pm25?.v || pollutants.pm25 || 95.0, // Fallback to Poor range if missing
+      "PM10": iaqi.pm10?.v || pollutants.pm10 || 150.0, // Fallback to Poor range
+      "NO2": iaqi.no2?.v || pollutants.no2 || 45.0,
+      "SO2": iaqi.so2?.v || pollutants.so2 || 12.0,
+      "CO": iaqi.co?.v || pollutants.co || 1.5,
+      "Temperature": iaqi.t?.v || 30.0,
+      "Wind Speed": iaqi.w?.v || 5.5
+    };
+
+    console.log("Sending GRAP Payload (Raw/Hybrid):", payload);
+
+    const response = await fetch(`${API_BASE_URL}/api/pollution/ml-ahmedabad-grap`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      throw new Error('Network response was not ok');
+    }
+
+    const data = await response.json();
+    
+    // Map backend response to Recommendation interface
+    // Backend returns: { predicted_stage, severity_level, recommended_actions: string[] }
+    const actions = data.recommended_actions || [];
+    const severity = data.severity_level || 'Moderate';
+    
+    // Helper to determine priority based on severity
+    const getPriority = () => {
+      const s = severity.toLowerCase();
+      if (s.includes('severe') || s.includes('emergency') || s.includes('very poor')) return 'high';
+      if (s.includes('poor')) return 'medium';
+      return 'low';
+    };
+
+    // Helper to guess icon based on action text
+    const getIcon = (text: string) => {
+      const t = text.toLowerCase();
+      if (t.includes('vehicle') || t.includes('transport') || t.includes('car') || t.includes('traffic')) return 'bus';
+      if (t.includes('industry') || t.includes('factory') || t.includes('emission') || t.includes('power')) return 'factory';
+      if (t.includes('plant') || t.includes('tree') || t.includes('green')) return 'tree';
+      return 'alert';
+    };
+
+    const mappedRecommendations = actions.map((action: string, index: number) => ({
+      id: index + 1,
+      icon: getIcon(action),
+      title: action,
+      priority: getPriority()
+    }));
+
+    // If no actions returned, fallback to mock
+    if (mappedRecommendations.length === 0) {
+      return mockRecommendations;
+    }
+
+    return mappedRecommendations;
+
+  } catch (error) {
+    console.error("Failed to fetch GRAP recommendations:", error);
+    return mockRecommendations;
+  }
 };
