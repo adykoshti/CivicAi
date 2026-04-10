@@ -51,6 +51,8 @@ def build_sequences(df):
 def main():
     print("\n========== CivicAI BiLSTM Trainer (Custom Emphasis: IoT + 2023) ==========\n")
     os.makedirs(ARTIFACT_DIR, exist_ok=True)
+    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    data_dir = os.path.join(BASE_DIR, "data")
     
     dfs = []
     
@@ -79,41 +81,93 @@ def main():
             print(f"[WARN] Failed to load IoT data: {e}")
 
     # ---------------------------------------------------------
-    # 2. Historical Data (2023 Emphasis)
+    # 2. Load ALL other CSVs in data directory
     # ---------------------------------------------------------
-    if os.path.exists(HIST_DATA_PATH):
-        try:
-            hist_df = pd.read_csv(HIST_DATA_PATH)
+    if os.path.exists(data_dir):
+        for filename in os.listdir(data_dir):
+            if not filename.endswith(".csv"):
+                continue
             
-            # Rename columns
-            mapping = {
-                "PM2.5 (ug/m3)": "PM2.5",
-                "PM10 (ug/m3)": "PM10",
-                "NO2 (ug/m3)": "NO2",
-                "SO2 (ug/m3)": "SO2",
-                "CO (mg/m3)": "CO",
-                "Ozone (ug/m3)": "O3",
-                "From Date": "Date"
-            }
-            hist_df = hist_df.rename(columns=mapping)
+            # Skip IoT data as it's already handled
+            if filename == "iot_data.csv":
+                continue
+                
+            file_path = os.path.join(data_dir, filename)
+            print(f"[INFO] Processing {filename}...")
             
-            # Filter 2023
-            hist_df["Date"] = pd.to_datetime(hist_df["Date"], errors='coerce')
-            hist_2023 = hist_df[hist_df["Date"].dt.year == 2023].copy()
-            print(f"[INFO] Filtered {len(hist_2023)} rows from year 2023")
-            
-            if not hist_2023.empty:
-                hist_2023["NH3"] = 45.0 
-                hist_2023[TARGET_COL] = hist_2023.apply(
-                    lambda row: calculate_aqi(
-                        row.get("PM2.5"), row.get("PM10"), row.get("NO2"), 
-                        row.get("SO2"), row.get("CO"), row.get("O3"), row.get("NH3")
-                    ), axis=1
-                )
-                hist_2023 = hist_2023[FEATURE_COLS + [TARGET_COL]]
-                dfs.append(hist_2023)
-        except Exception as e:
-            print(f"[WARN] Failed to load historical data: {e}")
+            try:
+                df = pd.read_csv(file_path)
+                
+                # Column Mapping (Handle verbose names)
+                mapping = {
+                    "PM2.5 (ug/m3)": "PM2.5",
+                    "PM10 (ug/m3)": "PM10",
+                    "NO2 (ug/m3)": "NO2",
+                    "SO2 (ug/m3)": "SO2",
+                    "CO (mg/m3)": "CO",
+                    "Ozone (ug/m3)": "O3",
+                    "From Date": "Timestamp",
+                    "Date": "Timestamp"
+                }
+                df = df.rename(columns=mapping)
+                
+                # Ensure Timestamp exists
+                if "Timestamp" not in df.columns:
+                    print(f"[WARN] Skipping {filename}: No 'Timestamp' or 'Date' column found.")
+                    continue
+                
+                df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+                df = df.dropna(subset=["Timestamp"])
+                
+                # Filter for Ahmedabad if City column exists
+                if "City" in df.columns:
+                    df = df[df["City"].str.lower() == "ahmedabad"]
+                    print(f"[INFO] Filtered {len(df)} rows for Ahmedabad from {filename}")
+                
+                if df.empty:
+                    print(f"[INFO] No valid rows in {filename} after filtering.")
+                    continue
+                
+                # Standardize Features
+                for col in FEATURE_COLS:
+                    if col not in df.columns:
+                        df[col] = 0.0
+                    else:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                
+                if "NH3" not in df.columns:
+                    df["NH3"] = 45.0
+                    
+                if TARGET_COL not in df.columns:
+                    df[TARGET_COL] = np.nan
+                else:
+                    df[TARGET_COL] = pd.to_numeric(df[TARGET_COL], errors="coerce")
+                    
+                # Fill missing
+                for col in FEATURE_COLS:
+                    if df[col].isna().all():
+                        df[col] = 0.0
+                    else:
+                        df[col] = df[col].fillna(df[col].median())
+                        
+                # Calculate AQI if missing
+                missing_aqi = df[TARGET_COL].isna()
+                if missing_aqi.any():
+                    df.loc[missing_aqi, TARGET_COL] = df.loc[missing_aqi].apply(
+                        lambda row: calculate_aqi(
+                            row.get("PM2.5"), row.get("PM10"), row.get("NO2"),
+                            row.get("SO2"), row.get("CO"), row.get("O3"), row.get("NH3")
+                        ), axis=1
+                    )
+                    
+                df = df[FEATURE_COLS + [TARGET_COL]]
+                
+                if not df.empty:
+                    dfs.append(df)
+                    print(f"[INFO] Added {len(df)} rows from {filename}")
+                    
+            except Exception as e:
+                print(f"[WARN] Failed to process {filename}: {e}")
 
     if not dfs:
         raise ValueError("No data available for BiLSTM training.")

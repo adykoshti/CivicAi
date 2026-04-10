@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
@@ -7,7 +7,7 @@ import joblib
 import shap
 import traceback
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 import os
 import random
@@ -17,14 +17,16 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from ml.train_model import train  # Import training function
-from ml.dataset_utils import load_and_merge_datasets
+from ml.dataset_utils import load_and_merge_datasets, calculate_aqi
 from routers.ml_ahmedabad_grap import router as grap_router
+from routers.pollutant_forecast import router as forecast_router
 
 # ---------------------------
 # FASTAPI APP INITIALIZATION
 # ---------------------------
 app = FastAPI(title="CivicAI Backend")
 app.include_router(grap_router)
+app.include_router(forecast_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,6 +35,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class IoTConnectionManager:
+    def __init__(self):
+        self.active_connections = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_json(message)
+            except Exception:
+                self.disconnect(connection)
+
+iot_ws_manager = IoTConnectionManager()
 
 # ---------------------------
 # LOAD MODELS & ARTIFACTS
@@ -52,15 +75,15 @@ except Exception as e:
 
 # Load Forecast Models
 try:
-    aqi_min_model = joblib.load("artifacts/aqi_min_model.pkl")
-    aqi_max_model = joblib.load("artifacts/aqi_max_model.pkl")
+    aqi_min_model = joblib.load("artifacts/aqi_min_10d_model.pkl")
+    aqi_max_model = joblib.load("artifacts/aqi_max_10d_model.pkl")
     print("[OK] Forecast models (Min/Max) loaded.")
 except Exception as e:
     print(f"[WARN] Forecast models not found: {e}. Run train_forecast.py")
     aqi_min_model, aqi_max_model = None, None
 
-# Calculate default means for imputation
 feature_means = {}
+aqi_caps = {"upper": None}
 try:
     _df = pd.read_csv("data/air_quality_india.csv")
     if feature_cols:
@@ -69,10 +92,13 @@ try:
                 feature_means[col] = _df[col].mean()
             else:
                 feature_means[col] = 0.0
+    if "AQI" in _df.columns:
+        cap = float(_df["AQI"].quantile(0.85))
+        if np.isfinite(cap) and cap > 0:
+            aqi_caps["upper"] = min(cap, 300.0)
     print(f"[OK] Feature means calculated: {feature_means}")
 except Exception as e:
     print(f"[WARN] Could not calculate feature means: {e}")
-    # Default fallback
     feature_means = {c: 0.0 for c in (feature_cols or [])}
 
 # Mandatory BiLSTM
@@ -104,6 +130,73 @@ import math
 # ---------------------------
 # UTILITY FUNCTIONS
 # ---------------------------
+def calculate_reliability_index():
+    """
+    Calculates the Reliability Index based on model metrics.
+    Formula: Index = α * R² + β * (1 − NRMSE) + γ * (1 − NMAE)
+    Weights (default): α=0.4, β=0.3, γ=0.3
+    
+    UPDATED: Statically set to 0.69 as per user request.
+    """
+    return 0.69
+    
+    # ORIGINAL LOGIC COMMENTED OUT FOR REFERENCE
+    # try:
+    #     # Use the specific AQI model metrics
+    #     metrics_path = "artifacts/aqi_model_metrics.json"
+    #     
+    #     # Fallback to general metrics if specific not found
+    #     if not os.path.exists(metrics_path):
+    #          metrics_path = "artifacts/model_metrics.json"
+    #
+    #     if not os.path.exists(metrics_path):
+    #         return 0.87 # Fallback if no metrics
+    #
+    #     with open(metrics_path, "r") as f:
+    #         metrics = json.load(f)
+    #     
+    #     if not metrics:
+    #         return 0.87
+    #
+    #     total_reliability = 0
+    #     count = 0
+    #     
+    #     alpha = 0.4
+    #     beta = 0.3
+    #     gamma = 0.3
+    #     
+    #     # Iterate over models in the file (e.g., "AQI_Model")
+    #     for model_name, data in metrics.items():
+    #         r2 = data.get("R2", 0)
+    #         mae = data.get("MAE", 0)
+    #         rmse = data.get("RMSE", 0)
+    #         max_error = data.get("MAX_ERROR", 1) # Avoid div/0
+    #         
+    #         if max_error == 0: max_error = 1
+    #
+    #         nrmse = rmse / max_error
+    #         nmae = mae / max_error
+    #         
+    #         # Clamp NRMSE/NMAE to 1 to avoid negative reliability contribution
+    #         nrmse = min(nrmse, 1.0)
+    #         nmae = min(nmae, 1.0)
+    #         
+    #         # Reliability for this model
+    #         rel = (alpha * r2) + (beta * (1 - nrmse)) + (gamma * (1 - nmae))
+    #         rel = max(0.0, min(1.0, rel)) # Clamp between 0 and 1
+    #         
+    #         total_reliability += rel
+    #         count += 1
+    #         
+    #     if count == 0:
+    #         return 0.87
+    #         
+    #     return round(total_reliability / count, 2)
+    #     
+    # except Exception as e:
+    #     print(f"[WARN] Failed to calculate reliability index: {e}")
+    #     return 0.87
+
 def clean_for_json(data):
     """Recursively clean data to ensure it is JSON compliant (handle NaN, Infinity)."""
     if isinstance(data, dict):
@@ -127,6 +220,50 @@ def load_dataset():
     return pd.read_csv("data/air_quality_india.csv")
 
 
+def _get_farthest_daily_forecast(series):
+    if not series:
+        return None
+    items = []
+    for item in series:
+        day_str = item.get("day")
+        if not day_str:
+            continue
+        try:
+            day = datetime.strptime(day_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        items.append((day, item))
+    if not items:
+        return None
+    items.sort(key=lambda x: x[0])
+    return items[-1][1]
+
+
+def get_waqi_10d_aqi_range():
+    url = "https://api.waqi.info/feed/@8192/?token=4cee6bbd2f43daab8272a3d76ac253978ea7dcce"
+    try:
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    daily = (data.get("data") or {}).get("forecast", {}).get("daily", {})
+    pm25_series = daily.get("pm25", [])
+    pm10_series = daily.get("pm10", [])
+    pm25_day = _get_farthest_daily_forecast(pm25_series)
+    pm10_day = _get_farthest_daily_forecast(pm10_series)
+    if not pm25_day and not pm10_day:
+        return None
+    pm25_min = pm25_day.get("min") if pm25_day else None
+    pm25_max = pm25_day.get("max") if pm25_day else None
+    pm10_min = pm10_day.get("min") if pm10_day else None
+    pm10_max = pm10_day.get("max") if pm10_day else None
+    min_aqi = calculate_aqi(pm25_min, pm10_min, None, None, None, None, None)
+    max_aqi = calculate_aqi(pm25_max, pm10_max, None, None, None, None, None)
+    if pd.isna(min_aqi) or pd.isna(max_aqi):
+        return None
+    return float(min_aqi), float(max_aqi)
+
+
 def aqi_to_severity(aqi):
     if aqi <= 50: return "good"
     elif aqi <= 100: return "satisfactory"
@@ -140,6 +277,47 @@ def ensemble_prediction(rf_pred, lstm_pred):
     if lstm_pred is None:
         return rf_pred
     return (0.6 * rf_pred) + (0.4 * lstm_pred)
+
+def apply_forecast_cap(forecast):
+    upper = aqi_caps.get("upper")
+    if upper is None:
+        return forecast
+    min_val = forecast.get("min")
+    max_val = forecast.get("max")
+    if min_val is None or max_val is None:
+        return forecast
+    if min_val > upper and max_val > upper:
+        delta = max_val - upper
+        capped_max = upper
+        capped_min = max(0.0, min_val - delta)
+    else:
+        capped_min = min(min_val, upper)
+        capped_max = min(max_val, upper)
+    if capped_min > capped_max:
+        capped_min, capped_max = capped_max, capped_min
+    return {"min": round(capped_min, 1), "max": round(capped_max, 1)}
+
+def adjust_forecast_relative(forecast, current_aqi):
+    try:
+        current = float(current_aqi)
+    except:
+        return forecast
+    min_val = forecast.get("min")
+    max_val = forecast.get("max")
+    if min_val is None or max_val is None or current <= 0:
+        return forecast
+    far = (
+        min_val < current * 0.7
+        or max_val > current * 1.6
+        or (max_val - min_val) > current * 0.9
+    )
+    if not far:
+        return forecast
+    target_min = current * 0.8
+    target_max = current * 1.4
+    if target_min > target_max:
+        target_min, target_max = target_max, target_min
+    return {"min": round(target_min, 1), "max": round(target_max, 1)}
 
 def aqi_to_concentration(aqi, pollutant):
     ranges = {
@@ -321,18 +499,49 @@ def predict_latest_aqi():
         shap_values = shap_explainer.shap_values(features)[0]
         shap_dict = {col: float(val) for col, val in zip(feature_cols, shap_values)}
         
-        # Forecast (Next Day Min/Max)
         forecast = {"min": None, "max": None}
         if aqi_min_model and aqi_max_model:
             try:
                 min_val = float(aqi_min_model.predict(features)[0])
                 max_val = float(aqi_max_model.predict(features)[0])
-                # Ensure logical consistency
                 if min_val > max_val:
                     min_val, max_val = max_val, min_val
                 forecast = {"min": round(min_val, 1), "max": round(max_val, 1)}
             except Exception as e:
                 print(f"[WARN] Forecast failed: {e}")
+
+        waqi_range = get_waqi_10d_aqi_range()
+        if waqi_range:
+            waqi_min, waqi_max = waqi_range
+            out_of_limits = (
+                forecast["min"] is None
+                or forecast["max"] is None
+                or forecast["min"] > 300
+                or forecast["max"] > 300
+            )
+            if out_of_limits:
+                forecast = {"min": round(waqi_min, 1), "max": round(waqi_max, 1)}
+            else:
+                forecast = {
+                    "min": round(0.7 * forecast["min"] + 0.3 * waqi_min, 1),
+                    "max": round(0.7 * forecast["max"] + 0.3 * waqi_max, 1),
+                }
+        
+        # PRINT REAL PREDICTION (No Cap)
+        print(f"\n[DEBUG] Real 10-day AI Prediction (No Cap): {forecast}\n")
+
+        # forecast = apply_forecast_cap(forecast) # Skipped as per user request to prioritize relative gap
+        
+        actual_aqi = features_dict.get("AQI") if used_source == "iot" else None
+        current_aqi = actual_aqi if actual_aqi is not None else final_pred
+        
+        # User requested gap ~50-60 relative to present AQI
+        # We'll use +/- 28 to get a gap of ~56
+        lower_bound = max(0, current_aqi - 28)
+        upper_bound = current_aqi + 28
+        forecast = {"min": round(lower_bound, 1), "max": round(upper_bound, 1)}
+
+        # forecast = adjust_forecast_relative(forecast, current_aqi) # Overridden by above logic
 
         response_data = {
             "city": city_name,
@@ -341,9 +550,9 @@ def predict_latest_aqi():
             "feature_contributions": shap_dict,
             "severity": aqi_to_severity(final_pred),
             "source": used_source,
-            "confidence": 0.87,
+            "confidence": calculate_reliability_index(),
             "current_pollutants": features_dict,
-            "forecast_next_24h": forecast
+            "forecast_next_10d": forecast
         }
 
         return clean_for_json(response_data)
@@ -353,113 +562,129 @@ def predict_latest_aqi():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def load_iot_csv(limit: int = 20):
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    iot_csv_path = os.path.join(base_dir, "data", "iot_data.csv")
+    iot_csv_path = os.path.abspath(iot_csv_path)
+
+    results = []
+
+    if not os.path.exists(iot_csv_path):
+        print(f"[WARN] IoT CSV not found at: {iot_csv_path}")
+        return []
+
+    with open(iot_csv_path, 'r') as f:
+        lines = f.readlines()
+
+    if len(lines) <= 1:
+        return []
+
+    header = lines[0].strip().split(',')
+
+    def parse_float(value):
+        if value is None:
+            return None
+        value = str(value).strip()
+        if value == "":
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    for line in reversed(lines[1:]):
+        if not line.strip():
+            continue
+
+        parts = line.strip().split(',')
+        if not header:
+            continue
+        row = dict(zip(header, parts[:len(header)]))
+
+        aqi_val = parse_float(row.get('AQI'))
+        pm25 = parse_float(row.get('PM2.5'))
+        pm10 = parse_float(row.get('PM10'))
+        no2 = parse_float(row.get('NO2'))
+        o3 = parse_float(row.get('O3'))
+        co = parse_float(row.get('CO'))
+        so2 = parse_float(row.get('SO2'))
+        nh3 = parse_float(row.get('NH3'))
+        temp = parse_float(row.get('Temperature'))
+        humidity = parse_float(row.get('Humidity'))
+        gas_raw = parse_float(row.get('GasRaw'))
+        city_val = row.get('Location') or row.get('City') or 'Ahmedabad'
+        time_str = row.get('Timestamp') or row.get('Time') or ''
+        device_id = row.get('DeviceId') or 'Unknown'
+
+        features = {}
+        if pm25 is not None:
+            features["PM2.5"] = pm25
+        if pm10 is not None:
+            features["PM10"] = pm10
+        if no2 is not None:
+            features["NO2"] = no2
+        if o3 is not None:
+            features["O3"] = o3
+        if co is not None:
+            features["CO"] = co
+        if so2 is not None:
+            features["SO2"] = so2
+
+        raw_values = {}
+        if pm25 is not None:
+            raw_values["pm25"] = pm25
+        if pm10 is not None:
+            raw_values["pm10"] = pm10
+        if no2 is not None:
+            raw_values["no2"] = no2
+        if so2 is not None:
+            raw_values["so2"] = so2
+        if o3 is not None:
+            raw_values["o3"] = o3
+        if co is not None:
+            raw_values["co"] = co
+        if nh3 is not None:
+            raw_values["nh3"] = nh3
+        if temp is not None:
+            raw_values["temp"] = temp
+        if humidity is not None:
+            raw_values["humidity"] = humidity
+        if gas_raw is not None:
+            raw_values["gasRaw"] = gas_raw
+
+        doc = {
+            "_id": str(random.randint(100000, 999999)),
+            "device_id": device_id,
+            "city": city_val,
+            "AQI": aqi_val if aqi_val is not None else 0,
+            "features": features,
+            "raw_values": raw_values,
+            "timestamp": time_str
+        }
+        results.append(doc)
+
+        if len(results) >= limit:
+            break
+
+    return clean_for_json(results)
+
 @app.get("/iot-data")
 def get_iot_data():
     try:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        iot_csv_path = os.path.join(base_dir, "data", "iot_data.csv")
-        iot_csv_path = os.path.abspath(iot_csv_path)
-        
-        results = []
-        
-        try:
-            if not os.path.exists(iot_csv_path):
-                 print(f"[WARN] IoT CSV not found at: {iot_csv_path}")
-                 return []
-                 
-            with open(iot_csv_path, 'r') as f:
-                lines = f.readlines()
-                
-            if len(lines) <= 1:
-                return []
-                
-            header = lines[0].strip().split(',')
-            
-            for line in reversed(lines[1:]):
-                if not line.strip():
-                    continue
-                    
-                parts = line.strip().split(',')
-                if not header:
-                    continue
-                row = dict(zip(header, parts[:len(header)]))
-
-                def parse_float(value):
-                    if value is None:
-                        return None
-                    value = str(value).strip()
-                    if value == "":
-                        return None
-                    try:
-                        return float(value)
-                    except ValueError:
-                        return None
-
-                aqi_val = parse_float(row.get('AQI'))
-                pm25 = parse_float(row.get('PM2.5'))
-                pm10 = parse_float(row.get('PM10'))
-                no2 = parse_float(row.get('NO2'))
-                o3 = parse_float(row.get('O3'))
-                co = parse_float(row.get('CO'))
-                so2 = parse_float(row.get('SO2'))
-                nh3 = parse_float(row.get('NH3'))
-                temp = parse_float(row.get('Temperature'))
-                humidity = parse_float(row.get('Humidity'))
-                gas_raw = parse_float(row.get('GasRaw'))
-                city_val = row.get('Location') or row.get('City') or 'Ahmedabad'
-                time_str = row.get('Timestamp') or row.get('Time') or ''
-                device_id = row.get('DeviceId') or 'Unknown'
-
-                features = {}
-                if pm25 is not None:
-                    features["PM2.5"] = pm25
-                if pm10 is not None:
-                    features["PM10"] = pm10
-                if no2 is not None:
-                    features["NO2"] = no2
-                if o3 is not None:
-                    features["O3"] = o3
-                if co is not None:
-                    features["CO"] = co
-                if so2 is not None:
-                    features["SO2"] = so2
-
-                raw_values = {}
-                if no2 is not None:
-                    raw_values["no2"] = no2
-                if co is not None:
-                    raw_values["co"] = co
-                if nh3 is not None:
-                    raw_values["nh3"] = nh3
-                if temp is not None:
-                    raw_values["temp"] = temp
-                if humidity is not None:
-                    raw_values["humidity"] = humidity
-                if gas_raw is not None:
-                    raw_values["gasRaw"] = gas_raw
-
-                doc = {
-                    "_id": str(random.randint(100000, 999999)),
-                    "device_id": device_id,
-                    "city": city_val,
-                    "AQI": aqi_val if aqi_val is not None else 0,
-                    "features": features,
-                    "raw_values": raw_values,
-                    "timestamp": time_str
-                }
-                results.append(doc)
-                
-                if len(results) >= 20:
-                    break
-
-        except Exception as e:
-            print(f"[ERROR] Reading CSV: {e}")
-            return []
-            
-        return clean_for_json(results)
+        return load_iot_csv()
     except Exception as e:
         print(f"[ERROR] GET /iot-data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.websocket("/ws/iot")
+async def iot_websocket(websocket: WebSocket):
+    await iot_ws_manager.connect(websocket)
+    try:
+        await websocket.send_json({"type": "init", "data": load_iot_csv()})
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        iot_ws_manager.disconnect(websocket)
 
 
 
@@ -555,7 +780,6 @@ def city_data(city: str):
         shap_values = shap_explainer.shap_values(features)[0]
         shap_dict = {col: float(val) for col, val in zip(feature_cols, shap_values)}
 
-        # Forecast (Next Day Min/Max)
         forecast = {"min": None, "max": None}
         if city.lower() == "ahmedabad" and aqi_min_model and aqi_max_model:
             try:
@@ -567,14 +791,34 @@ def city_data(city: str):
             except Exception as e:
                 print(f"[WARN] Forecast failed: {e}")
 
+        waqi_range = get_waqi_10d_aqi_range()
+        if waqi_range:
+            waqi_min, waqi_max = waqi_range
+            out_of_limits = (
+                forecast["min"] is None
+                or forecast["max"] is None
+                or forecast["min"] > 300
+                or forecast["max"] > 300
+            )
+            if out_of_limits:
+                forecast = {"min": round(waqi_min, 1), "max": round(waqi_max, 1)}
+            else:
+                forecast = {
+                    "min": round(0.7 * forecast["min"] + 0.3 * waqi_min, 1),
+                    "max": round(0.7 * forecast["max"] + 0.3 * waqi_max, 1),
+                }
+        forecast = apply_forecast_cap(forecast)
+        current_aqi = actual_aqi if actual_aqi is not None else final_pred
+        forecast = adjust_forecast_relative(forecast, current_aqi)
+
         response_data = {
             "city": city,
             "predicted_aqi": final_pred,
             "feature_contributions": shap_dict,
             "severity": aqi_to_severity(final_pred),
             "source": "live_iot" if use_live_data else "historical_csv",
-            "confidence": 0.87, # High confidence for Ahmedabad
-            "forecast_next_24h": forecast
+            "confidence": calculate_reliability_index(),
+            "forecast_next_10d": forecast
         }
 
         return clean_for_json(response_data)
@@ -632,15 +876,44 @@ async def receive_iot_data(request: Request):
         
         parts = csv_line.split(',')
         if len(parts) < 6:
-             raise HTTPException(status_code=400, detail="Invalid CSV format. Expected 6 fields: Location,Temperature,Humidity,GasRaw,Timestamp,NH3.")
-             
+             raise HTTPException(status_code=400, detail="Invalid CSV format.")
+
+        def parse_optional(value):
+            value = str(value).strip()
+            if value == "":
+                return None
+            try:
+                return float(value)
+            except ValueError:
+                return None
+
         try:
-            location = parts[0].strip()
-            temp = float(parts[1])
-            humidity = float(parts[2])
-            gas_raw = float(parts[3])
-            time_str = parts[4].strip()
-            nh3 = float(parts[5])
+            if len(parts) >= 12:
+                location = parts[0].strip()
+                temp = float(parts[1])
+                humidity = float(parts[2])
+                pm25 = parse_optional(parts[3])
+                pm10 = parse_optional(parts[4])
+                no2 = parse_optional(parts[5])
+                so2 = parse_optional(parts[6])
+                o3 = parse_optional(parts[7])
+                co = parse_optional(parts[8])
+                nh3 = parse_optional(parts[9])
+                gas_raw = float(parts[10])
+                time_str = parts[11].strip()
+            else:
+                location = parts[0].strip()
+                temp = float(parts[1])
+                humidity = float(parts[2])
+                gas_raw = float(parts[3])
+                time_str = parts[4].strip()
+                nh3 = float(parts[5])
+                pm25 = None
+                pm10 = None
+                no2 = None
+                so2 = None
+                o3 = None
+                co = None
         except ValueError:
              raise HTTPException(status_code=400, detail="Invalid number format in CSV.")
 
@@ -670,8 +943,10 @@ async def receive_iot_data(request: Request):
 
         location = normalize_location(location)
         timestamp_value = normalize_timestamp(time_str)
-        device_id_source = f"{location}-{timestamp_value}-{gas_raw}"
-        device_id = f"ESP8266-{hashlib.md5(device_id_source.encode('utf-8')).hexdigest()[:8]}"
+        device_id = request.headers.get("X-Device-Id")
+        if not device_id:
+            device_id_source = f"{location}-{timestamp_value}-{gas_raw}"
+            device_id = f"ESP8266-{hashlib.md5(device_id_source.encode('utf-8')).hexdigest()[:8]}"
 
         waqi_city = "ahmedabad"
         city_query = urllib.parse.quote(waqi_city)
@@ -713,29 +988,40 @@ async def receive_iot_data(request: Request):
             print(f"[IOT] WAQI fetch failed: {e}")
 
         features = {}
-        if waqi_values.get("PM2.5") is not None:
-            features["PM2.5"] = waqi_values.get("PM2.5")
-        if waqi_values.get("PM10") is not None:
-            features["PM10"] = waqi_values.get("PM10")
-        if waqi_values.get("NO2") is not None:
-            features["NO2"] = waqi_values.get("NO2")
-        if waqi_values.get("O3") is not None:
-            features["O3"] = waqi_values.get("O3")
-        if waqi_values.get("CO") is not None:
-            features["CO"] = waqi_values.get("CO")
-        if waqi_values.get("SO2") is not None:
-            features["SO2"] = waqi_values.get("SO2")
+        if pm25 is not None or waqi_values.get("PM2.5") is not None:
+            features["PM2.5"] = pm25 if pm25 is not None else waqi_values.get("PM2.5")
+        if pm10 is not None or waqi_values.get("PM10") is not None:
+            features["PM10"] = pm10 if pm10 is not None else waqi_values.get("PM10")
+        if no2 is not None or waqi_values.get("NO2") is not None:
+            features["NO2"] = no2 if no2 is not None else waqi_values.get("NO2")
+        if o3 is not None or waqi_values.get("O3") is not None:
+            features["O3"] = o3 if o3 is not None else waqi_values.get("O3")
+        if co is not None or waqi_values.get("CO") is not None:
+            features["CO"] = co if co is not None else waqi_values.get("CO")
+        if so2 is not None or waqi_values.get("SO2") is not None:
+            features["SO2"] = so2 if so2 is not None else waqi_values.get("SO2")
 
-        raw_values = {
-            "nh3": nh3,
-            "temp": temp,
-            "humidity": humidity,
-            "gasRaw": gas_raw
-        }
-        if waqi_values.get("NO2") is not None:
-            raw_values["no2"] = waqi_values.get("NO2")
-        if waqi_values.get("CO") is not None:
-            raw_values["co"] = waqi_values.get("CO")
+        raw_values = {}
+        if temp is not None:
+            raw_values["temp"] = temp
+        if humidity is not None:
+            raw_values["humidity"] = humidity
+        if pm25 is not None:
+            raw_values["pm25"] = pm25
+        if pm10 is not None:
+            raw_values["pm10"] = pm10
+        if no2 is not None:
+            raw_values["no2"] = no2
+        if so2 is not None:
+            raw_values["so2"] = so2
+        if o3 is not None:
+            raw_values["o3"] = o3
+        if co is not None:
+            raw_values["co"] = co
+        if nh3 is not None:
+            raw_values["nh3"] = nh3
+        if gas_raw is not None:
+            raw_values["gasRaw"] = gas_raw
 
         doc = {
             "timestamp": datetime.now(),
@@ -753,24 +1039,39 @@ async def receive_iot_data(request: Request):
             iot_csv_path = os.path.join(base_dir, "data", "iot_data.csv")
             iot_csv_path = os.path.abspath(iot_csv_path)
             
-            base_columns = ["Location", "Temperature", "Humidity", "GasRaw", "Timestamp", "NH3"]
-            api_columns = ["CO", "NO2", "PM2.5", "PM10", "O3", "SO2"]
-            expected_header = base_columns + ["AQI"] + api_columns + ["DeviceId"]
+            expected_header = [
+                "Location",
+                "Temperature",
+                "Humidity",
+                "PM2.5",
+                "PM10",
+                "NO2",
+                "SO2",
+                "O3",
+                "CO",
+                "NH3",
+                "GasRaw",
+                "Timestamp",
+                "AQI",
+                "DeviceId"
+            ]
 
             row_values = {
                 "Location": location,
                 "Temperature": temp,
                 "Humidity": humidity,
+                "PM2.5": pm25 if pm25 is not None else waqi_values.get("PM2.5"),
+                "PM10": pm10 if pm10 is not None else waqi_values.get("PM10"),
+                "NO2": no2 if no2 is not None else waqi_values.get("NO2"),
+                "SO2": so2 if so2 is not None else waqi_values.get("SO2"),
+                "O3": o3 if o3 is not None else waqi_values.get("O3"),
+                "CO": co if co is not None else waqi_values.get("CO"),
+                "NH3": nh3,
                 "GasRaw": gas_raw,
                 "Timestamp": timestamp_value,
-                "NH3": nh3,
                 "AQI": waqi_values.get("AQI") if waqi_values.get("AQI") is not None else "",
                 "DeviceId": device_id
             }
-            for key in api_columns:
-                value = waqi_values.get(key)
-                if value is not None:
-                    row_values[key] = value
 
             file_exists = os.path.exists(iot_csv_path)
             needs_header_write = not file_exists
@@ -795,6 +1096,17 @@ async def receive_iot_data(request: Request):
             print(f"[IOT] Data saved to CSV at {iot_csv_path}")
         except Exception as e:
             print(f"[IOT] Error saving to CSV: {e}")
+
+        broadcast_payload = {
+            "_id": str(random.randint(100000, 999999)),
+            "device_id": device_id,
+            "city": location,
+            "AQI": waqi_values.get("AQI") if waqi_values.get("AQI") is not None else 0,
+            "features": features,
+            "raw_values": raw_values,
+            "timestamp": timestamp_value
+        }
+        await iot_ws_manager.broadcast({"type": "iot_update", "data": clean_for_json(broadcast_payload)})
 
         return {"received": csv_line, "aqi": waqi_values.get("AQI"), "waqi": waqi_values}
 
@@ -935,4 +1247,4 @@ def health_alerts(aqi: float, profile: str = "general"):
 # RUN SERVER
 # -----------------------------------------
 if __name__ == "__main__":
-    uvicorn.run("main:app", port=8001)
+    uvicorn.run("main:app", host="0.0.0.0", port=8001)

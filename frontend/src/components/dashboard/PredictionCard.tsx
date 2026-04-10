@@ -47,7 +47,7 @@ const PredictionCard = ({ predictedAQI, trend, confidence, forecast }: Predictio
           <div className="flex flex-col gap-1">
             <p className={cn('text-lg font-medium', status.color)}>{status.label}</p>
             <div className="flex items-center gap-2">
-              <p className="text-base text-muted-foreground">Confidence:</p>
+              <p className="text-base text-muted-foreground">Reliability index:</p>
               <p className="text-lg font-semibold text-foreground">{Math.round(confidence * 100)}%</p>
             </div>
           </div>

@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { useLocation } from 'react-router-dom';
 import Navbar from '@/components/Navbar';
 import AQICard from '@/components/dashboard/AQICard';
 import HealthRiskCard from '@/components/dashboard/HealthRiskCard';
@@ -8,6 +9,7 @@ import PollutionSourceCard from '@/components/dashboard/PollutionSourceCard';
 import RecommendationsCard from '@/components/dashboard/RecommendationsCard';
 import MiniMap from '@/components/dashboard/MiniMap';
 import PollutantChart from '@/components/dashboard/PollutantChart';
+import PredictedPollutants from '@/components/dashboard/PredictedPollutants';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { 
   fetchLatestAQI, 
@@ -15,62 +17,172 @@ import {
   fetchSHAPData, 
   fetchRecommendations,
   getHealthRisk,
-  fetchCities
+  fetchCities,
+  getAQIStatus,
+  fetchStationFeed
 } from '@/services/api';
 
+type City = {
+  id: string;
+  name: string;
+  aqi?: number;
+};
+
+type AQIPollutants = {
+  pm25?: number;
+  pm10?: number;
+  no2?: number;
+  o3?: number;
+  so2?: number;
+  co?: number;
+};
+
+type AQIData = {
+  aqi: number;
+  status?: string;
+  pollutants?: AQIPollutants;
+  raw?: {
+    iaqi?: Record<string, { v?: number }>;
+  };
+};
+
+type PredictionData = {
+  predictedAQI?: number;
+  trend?: string;
+  confidence?: number;
+  forecast?: { min: number; max: number } | null;
+};
+
+type SHAPData = {
+  features?: Array<{ name: string; value: number }>;
+};
+
+type Recommendation = {
+  id: number;
+  icon: string;
+  title: string;
+  priority: string;
+};
+
 const Dashboard = () => {
-  const [cities, setCities] = useState<any[]>([]);
+  const location = useLocation();
+  const [cities, setCities] = useState<City[]>([]);
   const [selectedCity, setSelectedCity] = useState('ahmedabad');
   const [selectedCountry, setSelectedCountry] = useState('india');
   const [loading, setLoading] = useState(true);
-  const [aqiData, setAqiData] = useState<any>(null);
-  const [prediction, setPrediction] = useState<any>(null);
-  const [shapData, setShapData] = useState<any>(null);
-  const [recommendations, setRecommendations] = useState<any[]>([]);
+  const [aqiData, setAqiData] = useState<AQIData | null>(null);
+  const [prediction, setPrediction] = useState<PredictionData | null>(null);
+  const [shapData, setShapData] = useState<SHAPData | null>(null);
+  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [externalAqi, setExternalAqi] = useState<number | null>(null);
+  const [externalAqiStatus, setExternalAqiStatus] = useState('Loading');
+  const [externalAqiError, setExternalAqiError] = useState<string | null>(null);
 
   useEffect(() => {
     const initCities = async () => {
       const cityList = await fetchCities();
       setCities(cityList);
-      if (cityList.length > 0 && !selectedCity) {
-        setSelectedCity(cityList[0].id);
+      if (cityList.length > 0) {
+        setSelectedCity((current) => current || cityList[0].id);
       }
     };
     initCities();
   }, []);
 
-  useEffect(() => {
-    const loadData = async () => {
-      setLoading(true);
-      try {
-        // Fetch AQI first as it is needed for recommendations
-        const aqi = await fetchLatestAQI(selectedCity);
-        
-        const [pred, shap, recs] = await Promise.all([
-          fetchPrediction(selectedCity),
-          fetchSHAPData(),
-          fetchRecommendations(aqi),
-        ]);
-        
-        setAqiData(aqi);
-        setPrediction(pred);
-        setShapData(shap);
-        setRecommendations(recs as any[]);
-      } catch (error) {
-        console.error('Error loading dashboard data:', error);
-      } finally {
-        setLoading(false);
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setExternalAqiStatus('Loading');
+    setExternalAqiError(null);
+    try {
+      const externalAqiResponse = await Promise.allSettled([
+        fetchLatestAQI(selectedCity),
+        fetchStationFeed(8192)
+      ]);
+
+      const aqiResult = externalAqiResponse[0];
+      const externalResult = externalAqiResponse[1];
+
+      if (aqiResult.status === 'fulfilled') {
+        setAqiData(aqiResult.value);
+      } else {
+        setAqiData(null);
       }
-    };
 
+      if (externalResult.status === 'fulfilled') {
+        const value = Number(externalResult.value?.aqi);
+        if (Number.isFinite(value)) {
+          setExternalAqi(value);
+          setExternalAqiStatus(getAQIStatus(value).label);
+          setExternalAqiError(null);
+        } else {
+          setExternalAqi(null);
+          setExternalAqiStatus('Error');
+          setExternalAqiError('Invalid AQI payload');
+        }
+      } else {
+        setExternalAqi(null);
+        setExternalAqiStatus('Error');
+        setExternalAqiError('Failed to load external AQI');
+      }
+
+      const [pred, shap, recs] = await Promise.all([
+        fetchPrediction(selectedCity),
+        fetchSHAPData(),
+        fetchRecommendations(aqiResult.status === 'fulfilled' ? aqiResult.value : undefined),
+      ]);
+
+      setPrediction(pred);
+      setShapData(shap);
+      setRecommendations(recs as Recommendation[]);
+    } catch (error) {
+      console.error('Error loading dashboard data:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedCity]);
+
+  useEffect(() => {
     loadData();
-
-    // Auto-refresh every 5 minutes (300000 ms)
     const interval = setInterval(loadData, 300000);
     return () => clearInterval(interval);
-  }, [selectedCity, selectedCountry]);
+  }, [loadData]);
+
+  useEffect(() => {
+    if (location.pathname === '/dashboard') {
+      loadData();
+    }
+  }, [location.pathname, loadData]);
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        loadData();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [loadData]);
 
   const healthRisk = aqiData ? getHealthRisk(aqiData.aqi) : { level: 'Loading', description: '' };
+  const aqiCardValue = externalAqi ?? aqiData?.aqi ?? 56;
+  const aqiCardStatus = externalAqi !== null
+    ? externalAqiStatus
+    : externalAqiError
+      ? 'Error'
+      : loading
+        ? 'Loading'
+        : aqiData?.status || 'Moderate';
+
+  const adjustForecastRange = (forecast?: { min: number; max: number } | null) => {
+    if (!forecast || typeof aqiCardValue !== 'number') return forecast;
+    const current = Number(aqiCardValue);
+    if (!Number.isFinite(current) || current <= 0) return forecast;
+    const isFar = forecast.min < current * 0.7 || forecast.max > current * 1.6 || (forecast.max - forecast.min) > current * 0.9;
+    if (!isFar) return forecast;
+    const min = Math.round(current * 8) / 10;
+    const max = Math.round(current * 14) / 10;
+    return { min, max };
+  };
 
   const calculatePollutionSources = () => {
     if (!aqiData?.pollutants) return [];
@@ -137,8 +249,8 @@ const Dashboard = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
           {/* Row 1 */}
           <AQICard
-            aqi={aqiData?.aqi || 56}
-            status={aqiData?.status || 'Moderate'}
+            aqi={aqiCardValue}
+            status={aqiCardStatus}
             pollutants={{
               pm25: aqiData?.pollutants?.pm25 || 12.4,
               pm10: aqiData?.pollutants?.pm10 || 25,
@@ -155,12 +267,15 @@ const Dashboard = () => {
             predictedAQI={prediction?.predictedAQI || 62}
             trend={prediction?.trend || 'up'}
             confidence={prediction?.confidence || 0.87}
-            forecast={prediction?.forecast}
+            forecast={adjustForecastRange(prediction?.forecast)}
           />
           
           <MiniMap city={cities.find(c => c.id === selectedCity)?.name || "Ahmedabad"} state="India" />
 
-          {/* Row 2 */}
+          {/* Row 2 - Forecast */}
+          <PredictedPollutants />
+
+          {/* Row 3 - SHAP & Sources */}
           <div className="lg:col-span-2">
             <SHAPChart features={shapData?.features || []} />
           </div>
@@ -169,7 +284,7 @@ const Dashboard = () => {
             <PollutionSourceCard sources={pollutionSources} />
           </div>
 
-          {/* Row 3 */}
+          {/* Row 4 - Details */}
           <div className="lg:col-span-2">
             <PollutantChart pollutants={aqiData?.pollutants || {
               pm25: 12.4,

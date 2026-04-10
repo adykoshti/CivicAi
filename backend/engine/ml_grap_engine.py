@@ -4,6 +4,11 @@ import sys
 import os
 import pandas as pd
 import numpy as np
+try:
+    from engine.grap_explanation import GrapExplainer
+except ImportError:
+    # Fallback for local execution
+    from grap_explanation import GrapExplainer
 
 # Load model and maps
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -64,11 +69,33 @@ def predict_grap(input_data):
         predicted_stage = model.predict(input_df)[0]
         predicted_stage_str = str(predicted_stage)
         
+        # SHAP Explanation
+        dom_factor, shap_expl, actionable_insight = GrapExplainer.get_explanation(model, input_df, predicted_stage)
+        
+        # Get standard actions
+        standard_actions = label_maps["actions"].get(predicted_stage_str, [])
+        
+        # Prioritize SHAP-based actionable insight if available
+        if actionable_insight:
+            # Prepend the specific insights to recommendations
+            priority_actions = []
+            if isinstance(actionable_insight, list):
+                priority_actions = [f"[Priority] {action}" for action in actionable_insight]
+            else:
+                priority_actions = [f"[Priority] {actionable_insight}"]
+            
+            final_actions = priority_actions + standard_actions
+        else:
+            final_actions = standard_actions
+
         # Map results
         result = {
             "predicted_stage": label_maps["stage"].get(predicted_stage_str, "Unknown"),
+            "predicted_action": label_maps["stage"].get(predicted_stage_str, "Unknown"), # Requested field
             "severity_level": label_maps["severity"].get(predicted_stage_str, "Unknown"),
-            "recommended_actions": label_maps["actions"].get(predicted_stage_str, [])
+            "recommended_actions": final_actions,
+            "dominant_factor": dom_factor,
+            "shap_explanation": shap_expl
         }
         return result
     except Exception as e:

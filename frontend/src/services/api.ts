@@ -1,5 +1,5 @@
 
-const API_BASE_URL = 'http://localhost:8001';
+export const API_BASE_URL = 'http://localhost:8001';
 const WAQI_API_TOKEN = import.meta.env.VITE_WAQI_API_TOKEN || 'demo';
 const WAQI_BASE_URL = 'https://api.waqi.info/feed';
 
@@ -34,6 +34,13 @@ const mockIoTData = [
 export const CITY_LIST = [
   "Ahmedabad", "Aizawl", "Amaravati", "Amritsar", "Bengaluru", "Bhopal", "Brajrajnagar", "Chandigarh", "Chennai", "Coimbatore", "Delhi", "Ernakulam", "Gurugram", "Guwahati", "Hyderabad", "Jaipur", "Jorapokhar", "Kochi", "Kolkata", "Lucknow", "Mumbai", "Patna", "Shillong", "Talcher", "Thiruvananthapuram", "Visakhapatnam"
 ];
+
+type RecommendationInput = {
+  pollutants?: Record<string, number>;
+  raw?: {
+    iaqi?: Record<string, { v?: number }>;
+  };
+};
 
 const mockCities = [
   { id: 'ahmedabad', name: 'Ahmedabad', state: 'Gujarat', aqi: 72, lat: 23.0225, lng: 72.5714 },
@@ -219,7 +226,7 @@ export const fetchPrediction = async (city?: string) => {
     const data = await response.json();
 
     // Validate forecast structure
-    const forecastData = data.forecast_next_24h;
+    const forecastData = data.forecast_next_10d ?? data.forecast_next_24h;
     const isValidForecast = forecastData && 
                             typeof forecastData.min === 'number' && 
                             typeof forecastData.max === 'number';
@@ -228,12 +235,12 @@ export const fetchPrediction = async (city?: string) => {
       predictedAQI: data.predicted_aqi !== null ? Math.round(data.predicted_aqi) : "?",
       trend: 'stable', 
       confidence: data.confidence !== undefined ? data.confidence : 0.85, 
-      timeframe: '24h',
+      timeframe: '10d',
       forecast: isValidForecast ? forecastData : null
     };
   } catch (error) {
     console.error("Failed to fetch prediction:", error);
-    return { predictedAQI: 0, trend: 'unknown', confidence: 0, timeframe: '24h', forecast: null };
+    return { predictedAQI: 0, trend: 'unknown', confidence: 0, timeframe: '10d', forecast: null };
   }
 };
 
@@ -288,18 +295,48 @@ export const searchStations = async (keyword: string) => {
     }
 };
 
-export const fetchStationFeed = async (uid: number) => {
-    try {
-        const response = await fetch(`https://api.waqi.info/feed/@${uid}/?token=${WAQI_API_TOKEN}`);
-        const data = await response.json();
-        if (data.status === 'ok') {
-            return data.data;
-        }
-        return null;
-    } catch (error) {
-        console.error(`Error fetching feed for uid ${uid}:`, error);
-        return null;
+export const fetchStationFeed = async (stationId: number) => {
+  try {
+    const response = await fetch(`${WAQI_BASE_URL}/@${stationId}/?token=${WAQI_API_TOKEN}`);
+    const data = await response.json();
+    
+    if (data.status === 'ok') {
+      return {
+        aqi: data.data.aqi,
+        pollutants: data.data.iaqi
+      };
     }
+    return null;
+  } catch (error) {
+    console.error('Error fetching station feed:', error);
+    return null;
+  }
+};
+
+export const fetchPollutantForecast = async () => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/pollution/forecast-10-days`);
+    if (!response.ok) {
+      throw new Error('Network response was not ok');
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching pollutant forecast:', error);
+    return [];
+  }
+};
+
+export const fetchActualPollutantHistory = async () => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/pollution/actual-10-days`);
+    if (!response.ok) {
+      throw new Error('Network response was not ok');
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching actual pollutant history:', error);
+    return [];
+  }
 };
 
 export const fetchIoTData = async () => {
@@ -363,7 +400,7 @@ export const fetchCities = async () => {
   }
 };
 
-export const fetchRecommendations = async (aqiData?: any) => {
+export const fetchRecommendations = async (aqiData?: RecommendationInput | null) => {
   try {
     // If no AQI data provided or it's missing essential components, fallback to mock
     if (!aqiData || !aqiData.pollutants) {

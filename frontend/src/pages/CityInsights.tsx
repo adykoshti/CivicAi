@@ -7,8 +7,20 @@ import { Badge } from '@/components/ui/badge';
 import { fetchCities, getAQIStatus } from '@/services/api';
 import { MapPin, Thermometer, Wind, Droplets } from 'lucide-react';
 
+type City = {
+  id: string | number;
+  name: string;
+  state?: string;
+  aqi: number;
+  lat?: number;
+  lng?: number;
+  temp?: number;
+  humidity?: number;
+  wind?: number;
+};
+
 const CityInsights = () => {
-  const [cities, setCities] = useState<any[]>([]);
+  const [cities, setCities] = useState<City[]>([]);
   const [selectedCity, setSelectedCity] = useState<string>('');
   const [timeRange, setTimeRange] = useState([24]);
   const [loading, setLoading] = useState(true);
@@ -17,9 +29,9 @@ const CityInsights = () => {
     const loadCities = async () => {
       try {
         const data = await fetchCities();
-        setCities(data as any[]);
-        if ((data as any[]).length > 0 && !selectedCity) {
-          setSelectedCity((data as any[])[0].id.toString());
+        setCities(data as City[]);
+        if (data.length > 0) {
+          setSelectedCity((current) => current || data[0].id.toString());
         }
       } catch (error) {
         console.error('Error loading cities:', error);

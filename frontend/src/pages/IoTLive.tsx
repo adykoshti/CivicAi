@@ -1,94 +1,149 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Navbar from '@/components/Navbar';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-import { fetchIoTData, fetchLatestAQI, searchStations, fetchStationFeed, getAQIStatus, aqiToConcentration } from '@/services/api';
+import { API_BASE_URL, fetchIoTData, fetchLatestAQI, searchStations, fetchStationFeed, getAQIStatus, aqiToConcentration } from '@/services/api';
 import { Wifi, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
+type SensorValue = string | number;
+
+type SensorRow = {
+  id: string | number;
+  sensorId: string;
+  location: string;
+  temperature: SensorValue;
+  humidity: SensorValue;
+  nh3: SensorValue;
+  gasRaw: SensorValue;
+  aqi: SensorValue;
+  pm25: SensorValue;
+  pm10: SensorValue;
+  no2: SensorValue;
+  so2: SensorValue;
+  o3: SensorValue;
+  co: SensorValue;
+  status: string;
+  timestamp: string;
+};
+
+type ChartPoint = {
+  time: string;
+  aqi: number;
+  status: string;
+  no2: number;
+  so2: number;
+  o3: number;
+  co: number;
+  temperature: number;
+  humidity: number;
+  nh3: number;
+  gasRaw: number;
+  pm25?: number;
+  pm10?: number;
+};
+
+type IoTRawValues = {
+  temp?: number;
+  humidity?: number;
+  nh3?: number;
+  gasRaw?: number;
+  pm25?: number;
+  pm10?: number;
+  no2?: number;
+  so2?: number;
+  o3?: number;
+  co?: number;
+};
+
+type IoTEntry = {
+  _id?: { $oid?: string } | string;
+  device_id?: string;
+  city?: string;
+  AQI?: number;
+  aqi?: number;
+  raw_values?: IoTRawValues;
+  timestamp?: string;
+};
+
+type StationDetail = {
+  aqi?: number | string;
+  iaqi?: Record<string, { v?: number }>;
+};
+
+type Station = {
+  uid: number;
+  aqi?: number | string;
+  station: { name: string };
+  details?: StationDetail;
+};
+
 const IoTLive = () => {
-  const [sensorData, setSensorData] = useState<any[]>([]);
+  const [sensorData, setSensorData] = useState<SensorRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState(new Date());
 
-  const [chartData, setChartData] = useState<any[]>([]);
+  const [chartData, setChartData] = useState<ChartPoint[]>([]);
   const [selectedCity, setSelectedCity] = useState<string>('ahmedabad');
   const [dataSource, setDataSource] = useState<'iot' | 'api'>('iot');
+  const wsRef = useRef<WebSocket | null>(null);
 
-  const loadData = async (cityOverride?: string, sourceOverride?: 'iot' | 'api') => {
+  const toNumberOrDash = useCallback((value: unknown, digits = 1) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num.toFixed(digits) : '-';
+  }, []);
+
+  const toAqiValue = useCallback((value: unknown) => {
+    const num = Number(value);
+    return Number.isFinite(num) && num > 0 ? num : '-';
+  }, []);
+
+  const mapIoTEntry = useCallback((entry: IoTEntry): SensorRow => {
+    const aqiValue = toAqiValue(entry?.AQI ?? entry?.aqi);
+    return {
+      id: entry._id?.$oid || entry._id || Math.random(),
+      sensorId: entry.device_id || 'ESP8266-Node',
+      location: entry.city || 'Unknown',
+      temperature: toNumberOrDash(entry.raw_values?.temp),
+      humidity: toNumberOrDash(entry.raw_values?.humidity),
+      nh3: toNumberOrDash(entry.raw_values?.nh3),
+      gasRaw: toNumberOrDash(entry.raw_values?.gasRaw),
+      aqi: aqiValue,
+      pm25: toNumberOrDash(entry.raw_values?.pm25),
+      pm10: toNumberOrDash(entry.raw_values?.pm10),
+      no2: toNumberOrDash(entry.raw_values?.no2),
+      so2: toNumberOrDash(entry.raw_values?.so2),
+      o3: toNumberOrDash(entry.raw_values?.o3),
+      co: toNumberOrDash(entry.raw_values?.co, 2),
+      status: aqiValue === '-' ? 'Unknown' : getAQIStatus(Number(aqiValue)).label,
+      timestamp: entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Just now'
+    };
+  }, [toAqiValue, toNumberOrDash]);
+
+  const loadData = useCallback(async (cityOverride?: string, sourceOverride?: 'iot' | 'api') => {
     const city = cityOverride || selectedCity;
     const source = sourceOverride || dataSource;
     setLoading(true);
     try {
       if (source === 'iot') {
-        // 1. Fetch IoT Data from Backend (MongoDB/CSV)
         const iotReadings = await fetchIoTData();
-        
-        // 2. Fetch API Data for the cities present in IoT data (for merged view)
-        const cities = [...new Set(iotReadings.map((r: any) => r.city || selectedCity))];
-        const apiDataMap: Record<string, any> = {};
-
-        // Parallel fetch for cities
-        await Promise.all(cities.map(async (city) => {
-            if (!city || city === 'Unknown') return;
-            try {
-                const stations = await searchStations(city);
-                if (stations && stations.length > 0) {
-                    // Use the first station found to represent the city's ambient air
-                    const feed = await fetchStationFeed(stations[0].uid);
-                    apiDataMap[city] = feed;
-                }
-            } catch (err) {
-                console.error(`API fetch failed for ${city}`, err);
-            }
-        }));
-        
-        const sensors = iotReadings.map((data: any) => {
-            const city = data.city || 'Unknown';
-            const apiData = apiDataMap[city] || {};
-            const iaqi = apiData.iaqi || {};
-            
-            // Effective AQI from API
-            const effectiveAQI = apiData.aqi !== '-' ? Number(apiData.aqi) : 0;
-
-            return {
-                id: data._id?.$oid || data._id || Math.random(),
-                sensorId: data.device_id || 'ESP8266-Node', 
-                location: city,
-                // IoT Data (Temp, Humidity, NH3)
-                temperature: data.raw_values?.temp ? Number(data.raw_values.temp).toFixed(1) : '-',
-                humidity: data.raw_values?.humidity ? Number(data.raw_values.humidity).toFixed(1) : '-',
-                nh3: data.raw_values?.nh3 ? Number(data.raw_values.nh3).toFixed(1) : '-',
-                gasRaw: data.raw_values?.gasRaw ? Number(data.raw_values.gasRaw).toFixed(1) : '-',
-                
-                // API Data (Rest)
-                aqi: effectiveAQI || '-',
-                pm25: iaqi.pm25?.v ? aqiToConcentration(Number(iaqi.pm25.v), 'pm25').toFixed(1) : '-',
-                pm10: iaqi.pm10?.v ? aqiToConcentration(Number(iaqi.pm10.v), 'pm10').toFixed(1) : '-',
-                no2: iaqi.no2?.v ? aqiToConcentration(Number(iaqi.no2.v), 'no2').toFixed(1) : '-',
-                so2: iaqi.so2?.v ? Number(iaqi.so2.v).toFixed(1) : '-',
-                o3: iaqi.o3?.v ? aqiToConcentration(Number(iaqi.o3.v), 'o3').toFixed(1) : '-',
-                
-                status: getAQIStatus(effectiveAQI || 0).label,
-                timestamp: data.timestamp ? new Date(data.timestamp).toLocaleString() : 'Just now'
-            };
-        });
+        const sensors = iotReadings.map(mapIoTEntry);
 
         // Table: Latest 10 entries
         setSensorData(sensors.slice(0, 10));
 
         // 3. Chart Data (using merged data)
-        const chartPoints = [...sensors].reverse().map((s: any) => ({
+        const chartPoints: ChartPoint[] = [...sensors].reverse().map((s) => ({
             time: s.timestamp.includes(',') ? s.timestamp.split(',')[1].trim().slice(0, 5) : s.timestamp,
             aqi: s.aqi !== '-' ? Number(s.aqi) : 0,
             status: s.status,
             no2: s.no2 !== '-' ? Number(s.no2) : 0,
             so2: s.so2 !== '-' ? Number(s.so2) : 0,
             o3: s.o3 !== '-' ? Number(s.o3) : 0,
-            co: 0,
+            co: s.co !== '-' ? Number(s.co) : 0,
             temperature: s.temperature !== '-' ? Number(s.temperature) : 0,
             humidity: s.humidity !== '-' ? Number(s.humidity) : 0,
             nh3: s.nh3 !== '-' ? Number(s.nh3) : 0,
@@ -117,7 +172,7 @@ const IoTLive = () => {
         }
         
         // Fetch detailed feed for each station to get pollutant values
-        const detailedStationsPromises = searchResults.map(async (st: any) => {
+        const detailedStationsPromises = (searchResults as Station[]).map(async (st) => {
             const feed = await fetchStationFeed(st.uid);
             if (feed) {
                 return {
@@ -132,7 +187,7 @@ const IoTLive = () => {
         
         const fetchTime = new Date().toLocaleString();
  
-         const sensors = stations.map((st: any) => {
+         const sensors: SensorRow[] = stations.map((st) => {
              const d = st.details || {};
              const iaqi = d.iaqi || {};
              
@@ -171,12 +226,12 @@ const IoTLive = () => {
  
          // Chart Data (Focus on Chandkheda, Simulated Last 2 Mins like previous code)
          // Find Chandkheda station
-         const chandkhedaStation = sensors.find((s: any) => s.location.toLowerCase().includes('chandkheda'));
+         const chandkhedaStation = sensors.find((s) => s.location.toLowerCase().includes('chandkheda'));
          const targetStation = chandkhedaStation || (sensors.length > 0 ? sensors[0] : null);
          
          if (targetStation) {
              const now = new Date();
-             const points: any[] = [];
+             const points: ChartPoint[] = [];
              
              // Generate 13 points (0 to 12) for the last 2 minutes (120 seconds)
              // Step = 10 seconds
@@ -212,14 +267,93 @@ const IoTLive = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [dataSource, mapIoTEntry, selectedCity]);
+
+  useEffect(() => {
+    if (dataSource !== 'iot') {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      return;
+    }
+
+    const wsUrl = `${API_BASE_URL.replace(/^http/, 'ws')}/ws/iot`;
+    const socket = new WebSocket(wsUrl);
+    wsRef.current = socket;
+
+    const updateChart = (entry: SensorRow) => {
+      const time = entry.timestamp.includes(',')
+        ? entry.timestamp.split(',')[1].trim().slice(0, 5)
+        : entry.timestamp;
+      const nextPoint: ChartPoint = {
+        time,
+        aqi: entry.aqi !== '-' ? Number(entry.aqi) : 0,
+        status: entry.status,
+        no2: entry.no2 !== '-' ? Number(entry.no2) : 0,
+        so2: entry.so2 !== '-' ? Number(entry.so2) : 0,
+        o3: entry.o3 !== '-' ? Number(entry.o3) : 0,
+        co: entry.co !== '-' ? Number(entry.co) : 0,
+        temperature: entry.temperature !== '-' ? Number(entry.temperature) : 0,
+        humidity: entry.humidity !== '-' ? Number(entry.humidity) : 0,
+        nh3: entry.nh3 !== '-' ? Number(entry.nh3) : 0,
+        gasRaw: entry.gasRaw !== '-' ? Number(entry.gasRaw) : 0,
+      };
+      setChartData((prev) => {
+        const merged = [...prev, nextPoint];
+        return merged.slice(-60);
+      });
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data) as { type?: string; data?: IoTEntry[] | IoTEntry };
+        if (message?.type === 'init' && Array.isArray(message.data)) {
+          const mapped = message.data.map(mapIoTEntry);
+          setSensorData(mapped.slice(0, 10));
+          setChartData([]);
+          mapped.slice().reverse().forEach(updateChart);
+          setLastUpdate(new Date());
+        }
+        if (message?.type === 'iot_update' && message.data) {
+          const mapped = mapIoTEntry(message.data);
+          setSensorData((prev) => {
+            const filtered = prev.filter((item) => item.id !== mapped.id);
+            return [mapped, ...filtered].slice(0, 10);
+          });
+          updateChart(mapped);
+          setLastUpdate(new Date());
+        }
+      } catch (error) {
+        console.error('Failed to parse IoT websocket message:', error);
+      }
+    };
+
+    socket.onerror = () => {
+      if (wsRef.current === socket) {
+        wsRef.current = null;
+      }
+    };
+
+    socket.onclose = () => {
+      if (wsRef.current === socket) {
+        wsRef.current = null;
+      }
+    };
+
+    return () => {
+      socket.close();
+    };
+  }, [dataSource, mapIoTEntry]);
 
   useEffect(() => {
     setChartData([]); // Clear chart data to prevent mixing
     loadData();
-    const interval = setInterval(() => loadData(), 30000); // Refresh every 30s as requested
-    return () => clearInterval(interval);
-  }, [selectedCity, dataSource]); // Re-run when selectedCity or dataSource changes
+    if (dataSource === 'api') {
+      const interval = setInterval(() => loadData(), 30000); // Refresh every 30s as requested
+      return () => clearInterval(interval);
+    }
+  }, [loadData, dataSource]); // Re-run when selectedCity or dataSource changes
 
   const handleCityChange = (value: string) => {
     setSelectedCity(value);
@@ -323,7 +457,7 @@ const IoTLive = () => {
                         borderRadius: '8px',
                         color: 'hsl(var(--foreground))'
                       }}
-                      formatter={(value: any, name: any, props: any) => {
+                      formatter={(value: SensorValue, name: string, props: { payload?: { status?: string } }) => {
                         if (name === 'AQI Status') {
                           return [value, `AQI (${props.payload.status})`];
                         }
@@ -422,6 +556,12 @@ const IoTLive = () => {
                       <TableHead>Location</TableHead>
                       {dataSource === 'iot' && <TableHead>Temperature</TableHead>}
                       {dataSource === 'iot' && <TableHead>Humidity</TableHead>}
+                      {dataSource === 'iot' && <TableHead>PM2.5</TableHead>}
+                      {dataSource === 'iot' && <TableHead>PM10</TableHead>}
+                      {dataSource === 'iot' && <TableHead>NO2</TableHead>}
+                      {dataSource === 'iot' && <TableHead>SO2</TableHead>}
+                      {dataSource === 'iot' && <TableHead>O3</TableHead>}
+                      {dataSource === 'iot' && <TableHead>CO</TableHead>}
                       {dataSource === 'iot' && <TableHead>NH3</TableHead>}
                       {dataSource === 'api' && <TableHead>AQI</TableHead>}
                       {dataSource === 'api' && <TableHead>PM2.5</TableHead>}
@@ -441,6 +581,12 @@ const IoTLive = () => {
                         <TableCell>{sensor.location}</TableCell>
                         {dataSource === 'iot' && <TableCell>{sensor.temperature}°C</TableCell>}
                         {dataSource === 'iot' && <TableCell>{sensor.humidity}%</TableCell>}
+                        {dataSource === 'iot' && <TableCell>{sensor.pm25}</TableCell>}
+                        {dataSource === 'iot' && <TableCell>{sensor.pm10}</TableCell>}
+                        {dataSource === 'iot' && <TableCell>{sensor.no2}</TableCell>}
+                        {dataSource === 'iot' && <TableCell>{sensor.so2}</TableCell>}
+                        {dataSource === 'iot' && <TableCell>{sensor.o3}</TableCell>}
+                        {dataSource === 'iot' && <TableCell>{sensor.co}</TableCell>}
                         {dataSource === 'iot' && <TableCell>{sensor.nh3}</TableCell>}
                         {dataSource === 'api' && <TableCell className="font-bold">{sensor.aqi || '-'}</TableCell>}
                         {dataSource === 'api' && <TableCell>{sensor.pm25}</TableCell>}

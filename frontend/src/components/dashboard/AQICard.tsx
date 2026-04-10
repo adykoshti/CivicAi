@@ -18,6 +18,8 @@ const AQICard = ({ aqi, status, pollutants }: AQICardProps) => {
       case 'good': return 'bg-success text-success-foreground';
       case 'moderate': return 'bg-warning text-warning-foreground';
       case 'unhealthy': return 'bg-destructive text-destructive-foreground';
+      case 'loading': return 'bg-muted text-muted-foreground';
+      case 'error': return 'bg-destructive text-destructive-foreground';
       default: return 'bg-warning text-warning-foreground';
     }
   };

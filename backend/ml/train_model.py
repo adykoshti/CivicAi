@@ -25,6 +25,8 @@ def train(extra_data=None, override_df=None):
 
     # 1. Make sure artifacts folder exists
     os.makedirs(ARTIFACT_DIR, exist_ok=True)
+    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    data_dir = os.path.join(BASE_DIR, "data")
 
     if override_df is not None:
         print("[INFO] Using provided DataFrame for training...")
@@ -60,52 +62,93 @@ def train(extra_data=None, override_df=None):
                 print(f"[WARN] Failed to load IoT data: {e}")
 
         # ---------------------------------------------------------
-        # 2. Historical Data (2023 Emphasis)
+        # 2. Load ALL other CSVs in data directory
         # ---------------------------------------------------------
-        if os.path.exists(HIST_DATA_PATH):
-            try:
-                hist_df = pd.read_csv(HIST_DATA_PATH)
-                print(f"[INFO] Loaded {len(hist_df)} rows from historical data")
+        if os.path.exists(data_dir):
+            for filename in os.listdir(data_dir):
+                if not filename.endswith(".csv"):
+                    continue
                 
-                # Rename columns to match FEATURE_COLS
-                mapping = {
-                    "PM2.5 (ug/m3)": "PM2.5",
-                    "PM10 (ug/m3)": "PM10",
-                    "NO2 (ug/m3)": "NO2",
-                    "SO2 (ug/m3)": "SO2",
-                    "CO (mg/m3)": "CO",
-                    "Ozone (ug/m3)": "O3",
-                    "From Date": "Date"
-                }
-                hist_df = hist_df.rename(columns=mapping)
+                # Skip IoT data as it's already handled
+                if filename == "iot_data.csv":
+                    continue
+                    
+                file_path = os.path.join(data_dir, filename)
+                print(f"[INFO] Processing {filename}...")
                 
-                # Filter for 2023
-                hist_df["Date"] = pd.to_datetime(hist_df["Date"], errors='coerce')
-                hist_2023 = hist_df[hist_df["Date"].dt.year == 2023].copy()
-                print(f"[INFO] Filtered {len(hist_2023)} rows from year 2023")
-                
-                if not hist_2023.empty:
-                    # Impute NH3 
-                    # Use a baseline value derived from IoT data (approx 45.0) 
-                    # to align the historical domain with the IoT domain.
-                    hist_2023["NH3"] = 45.0 
+                try:
+                    df = pd.read_csv(file_path)
                     
-                    # Calculate AQI (Target)
-                    # We must generate the target because the file doesn't have it.
-                    print("[INFO] Calculating AQI for 2023 data...")
-                    hist_2023[TARGET_COL] = hist_2023.apply(
-                        lambda row: calculate_aqi(
-                            row.get("PM2.5"), row.get("PM10"), row.get("NO2"), 
-                            row.get("SO2"), row.get("CO"), row.get("O3"), row.get("NH3")
-                        ), axis=1
-                    )
+                    # Column Mapping (Handle verbose names)
+                    mapping = {
+                        "PM2.5 (ug/m3)": "PM2.5",
+                        "PM10 (ug/m3)": "PM10",
+                        "NO2 (ug/m3)": "NO2",
+                        "SO2 (ug/m3)": "SO2",
+                        "CO (mg/m3)": "CO",
+                        "Ozone (ug/m3)": "O3",
+                        "From Date": "Timestamp",
+                        "Date": "Timestamp"
+                    }
+                    df = df.rename(columns=mapping)
                     
-                    # Select cols
-                    hist_2023 = hist_2023[FEATURE_COLS + [TARGET_COL]]
-                    dfs.append(hist_2023)
+                    # Ensure Timestamp exists
+                    if "Timestamp" not in df.columns:
+                        print(f"[WARN] Skipping {filename}: No 'Timestamp' or 'Date' column found.")
+                        continue
                     
-            except Exception as e:
-                print(f"[WARN] Failed to load historical data: {e}")
+                    df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+                    df = df.dropna(subset=["Timestamp"])
+                    
+                    # Filter for Ahmedabad if City column exists
+                    if "City" in df.columns:
+                        df = df[df["City"].str.lower() == "ahmedabad"]
+                        print(f"[INFO] Filtered {len(df)} rows for Ahmedabad from {filename}")
+                    
+                    if df.empty:
+                        print(f"[INFO] No valid rows in {filename} after filtering.")
+                        continue
+                    
+                    # Standardize Features
+                    for col in FEATURE_COLS:
+                        if col not in df.columns:
+                            df[col] = 0.0
+                        else:
+                            df[col] = pd.to_numeric(df[col], errors="coerce")
+                    
+                    if "NH3" not in df.columns:
+                        df["NH3"] = 45.0
+                        
+                    if TARGET_COL not in df.columns:
+                        df[TARGET_COL] = np.nan
+                    else:
+                        df[TARGET_COL] = pd.to_numeric(df[TARGET_COL], errors="coerce")
+                        
+                    # Fill missing
+                    for col in FEATURE_COLS:
+                        if df[col].isna().all():
+                            df[col] = 0.0
+                        else:
+                            df[col] = df[col].fillna(df[col].median())
+                            
+                    # Calculate AQI if missing
+                    missing_aqi = df[TARGET_COL].isna()
+                    if missing_aqi.any():
+                        df.loc[missing_aqi, TARGET_COL] = df.loc[missing_aqi].apply(
+                            lambda row: calculate_aqi(
+                                row.get("PM2.5"), row.get("PM10"), row.get("NO2"),
+                                row.get("SO2"), row.get("CO"), row.get("O3"), row.get("NH3")
+                            ), axis=1
+                        )
+                        
+                    df = df[FEATURE_COLS + [TARGET_COL]]
+                    
+                    if not df.empty:
+                        dfs.append(df)
+                        print(f"[INFO] Added {len(df)} rows from {filename}")
+                        
+                except Exception as e:
+                    print(f"[WARN] Failed to process {filename}: {e}")
 
         if not dfs:
             raise ValueError("No valid data available for training! Check file paths.")
@@ -152,9 +195,32 @@ def train(extra_data=None, override_df=None):
     y_pred = model.predict(X_test)
     r2 = r2_score(y_test, y_pred)
     mae = mean_absolute_error(y_test, y_pred)
+    
+    # Calculate RMSE
+    from sklearn.metrics import mean_squared_error
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    
+    # Determine Max Error (Range of target)
+    max_error = y.max() - y.min()
 
     print(f"[RESULT] R² Score: {r2:.4f}")
     print(f"[RESULT] MAE: {mae:.4f}")
+    print(f"[RESULT] RMSE: {rmse:.4f}")
+    
+    # Save Metrics for Reliability Index
+    import json
+    metrics = {
+        "AQI_Model": {
+            "R2": r2,
+            "MAE": mae,
+            "RMSE": rmse,
+            "MAX_ERROR": max_error
+        }
+    }
+    metrics_path = os.path.join(ARTIFACT_DIR, "aqi_model_metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=4)
+    print(f"[INFO] AQI Model metrics saved to {metrics_path}")
 
     # 8. Save model
     print("[INFO] Saving model artifacts...")
